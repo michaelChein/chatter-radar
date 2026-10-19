@@ -1,0 +1,15 @@
+services:
+  radar:
+    # Pull the published image (docker compose pull && docker compose up -d), or build from this folder
+    # (docker compose up -d --build). Pin a version with RADAR_IMAGE_TAG=0.2.0 in .env; default is the latest release.
+    image: ghcr.io/michaelchein/chatter-radar:${RADAR_IMAGE_TAG:-latest}
+    build: .
+    container_name: radar
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      RADAR_TZ: ${RADAR_TZ:-UTC}
+    volumes:
+      - ./data:/data

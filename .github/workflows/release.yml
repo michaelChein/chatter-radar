@@ -1,0 +1,63 @@
+# Push a version tag (git tag v0.2.0 && git push --tags) to publish a Docker image and a GitHub release.
+# The image is ghcr.io/<owner>/<repo>:<version> (also :<major>.<minor> and :latest), for amd64 and arm64.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag must match app/__init__.py
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' app/__init__.py)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match __version__ = $version in app/__init__.py" >&2
+            exit 1
+          fi
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: pytest -q
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub release
+      packages: write   # push the image
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
