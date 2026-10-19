@@ -262,3 +262,8 @@ body.setup-mode .credit { display: none; }
 
 /* something needs the user's attention (not the neutral accent banner) */
 .banner.alert { background: color-mix(in srgb, var(--warn) 12%, var(--surface)); border-color: color-mix(in srgb, var(--warn) 45%, var(--border)); }
+
+/* collapsed "Advanced" group at the bottom of the Pipeline tab */
+.advanced { margin-top: 28px; }
+.advanced > summary { cursor: pointer; font-size: 12.5px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 6px 0; }
+.advanced > summary:hover { color: var(--text); }

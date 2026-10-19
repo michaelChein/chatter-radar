@@ -652,7 +652,7 @@ async function renderSettings(view) {
   await loadMeta();
   const [stats, feedback, batches, info] = await Promise.all([api('/api/stats'), api('/api/feedback'), api('/api/batches?limit=20'), api('/api/info')]);
   const pct = (a, b) => b ? Math.round((100 * a) / b) + '%' : '—';
-  view.replaceChildren(
+  view.replaceChildren(...[
     h('h2', {}, 'How it\'s doing'),
     h('div', { class: 'card table-card' }, h('table', {},
       h('thead', {}, h('tr', {}, h('th', {}, 'Category'), h('th', { class: 'num' }, 'Found'), h('th', { class: 'num' }, 'Done'),
@@ -673,6 +673,9 @@ async function renderSettings(view) {
     h('p', { class: 'hint' }, 'Each category\'s description is given to the model verbatim — be specific about what counts and what doesn\'t.'),
     h('div', { class: 'list' }, state.categories.map(categoryEditor), categoryEditor(null)),
 
+    h('details', { class: 'advanced' },
+      h('summary', {}, 'Advanced'),
+      h('p', { class: 'hint' }, 'For troubleshooting and for running your own server. Nothing here needs your attention in normal use.'),
     h('h2', {}, 'Your feedback'),
     h('div', { class: 'toolbar' }, h('span', { class: 'hint' }, `${feedback.length} labels — the latest are included in every prompt as examples.`), h('span', { class: 'spacer' }),
       h('a', { class: 'btn', href: '/api/feedback/export.jsonl' }, 'Export as JSONL')),
@@ -692,15 +695,16 @@ async function renderSettings(view) {
       b.response_json && [h('div', { class: 'hint' }, 'Response'), h('pre', { class: 'code' }, JSON.stringify(JSON.parse(b.response_json), null, 2))])))
       : h('p', { class: 'hint' }, 'No runs yet.'),
 
-    h('h2', {}, 'Connecting'),
+    info.local ? null : [h('h2', {}, 'Connecting'),
     h('div', { class: 'card', style: { padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '8px' } },
       h('div', {}, 'Collectors POST to: ', h('span', { class: 'mono' }, info.ingest_url)),
-      h('div', { class: 'hint' }, `Header X-Token: <your RADAR_INGEST_TOKEN>${info.token_set ? '' : ' (not set — anyone can post!)'} · timezone ${info.timezone}`),
+      h('div', { class: 'hint' }, `Header X-Token: <your RADAR_INGEST_TOKEN>${info.token_set ? '' : ' (not set — anyone can post!)'}`),
       h('div', {}, 'Claude / ChatGPT connector: ', info.mcp_enabled ? h('span', { class: 'mono' }, info.mcp_url) : h('span', { class: 'hint' }, 'disabled — set RADAR_MCP_TOKEN (and RADAR_PUBLIC_URL)')),
-      info.mcp_enabled && h('div', { class: 'hint' }, 'Claude: Settings → Connectors → Add custom connector, header Authorization: Bearer <RADAR_MCP_TOKEN>. ChatGPT (web, developer mode): use the URL with ?key=<RADAR_MCP_TOKEN>.')),
+      info.mcp_enabled && h('div', { class: 'hint' }, 'Claude: Settings → Connectors → Add custom connector, header Authorization: Bearer <RADAR_MCP_TOKEN>. ChatGPT (web, developer mode): use the URL with ?key=<RADAR_MCP_TOKEN>.'))],
+    ),
     info.local && h('div', { class: 'hint', style: { marginTop: '24px' } }, 'To stop and remove Chatter Radar, open Terminal and run ', h('code', {}, '~/.radar/bin/radar uninstall'),
       ' (add --purge to delete your data too). It removes the background jobs and the program.'),
-    h('div', { style: { marginTop: '24px' } }, h('button', { class: 'btn ghost', onclick: async () => { await api('/api/logout', { method: 'POST' }); location.href = '/login'; } }, 'Sign out')));
+    h('div', { style: { marginTop: '24px' } }, h('button', { class: 'btn ghost', onclick: async () => { await api('/api/logout', { method: 'POST' }); location.href = '/login'; } }, 'Sign out'))].filter(Boolean));
 }
 
 function scheduleSection(info) {
@@ -728,7 +732,7 @@ function scheduleSection(info) {
           times.length > 1 && h('button', { class: 'btn ghost', title: 'Remove this time', 'aria-label': 'Remove this time', onclick: () => { times.splice(i, 1); draw(); } }, '×'))),
         times.length < 12 && h('button', { class: 'btn', onclick: () => { times.push('18:00'); draw(); } }, '+ Add a time'),
         h('button', { class: 'btn primary', onclick: save }, 'Save times')),
-      scheduled && info.next_run && h('div', { class: 'hint', style: { margin: '0 0 8px 26px' } }, `Next run: ${fmtStamp(info.next_run)}`),
+      scheduled && h('div', { class: 'hint', style: { margin: '0 0 8px 26px' } }, `Times are in ${info.timezone}.` + (info.next_run ? ` Next run: ${fmtStamp(info.next_run)}.` : '')),
       radio('realtime', 'Right after messages arrive', `More responsive, but costs about 3 times as much. Chatter Radar analyzes a chat about ${Math.max(1, Math.round(info.debounce_seconds / 60))} minutes after it goes quiet.`)].filter(Boolean));
   }
   draw();
