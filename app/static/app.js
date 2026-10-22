@@ -291,7 +291,7 @@ function chatsStep(st, again) {
           try {
             if (on) { await api(`/api/sources/${picked.get(c.name)}`, { method: 'DELETE' }); picked.delete(c.name); }
             else if (PREVIEW) picked.set(c.name, 0);
-            else picked.set(c.name, (await api('/api/sources', { body: { name: c.name, match_pattern: c.name, channel: c.channel } })).id);
+            else picked.set(c.name, (await api('/api/sources', { body: { name: c.name, match_pattern: c.name, channel: c.channel, history_days: 7 } })).id);
           } catch { return; }
           draw(); refreshFooter();
         } }, on ? '✓ Watching' : 'Watch'));
@@ -603,6 +603,9 @@ function sourceCard(s, view) {
       s.is_direct ? h('span', { class: 'badge' }, '1:1 chat') : h('span', { class: 'badge' }, 'group'),
       h('span', { class: 'badge' }, s.channel),
       h('span', { class: 'spacer' }),
+      s.history_count > 0 && h('button', { class: 'btn', title: 'Messages from the last 7 days that were stored as history but never analyzed',
+        onclick: async () => { const r = await api(`/api/sources/${s.id}/analyze-history`, { method: 'POST', body: { days: 7 } });
+          toast(`Analyzing ${r.requeued} older message${r.requeued === 1 ? '' : 's'}…`); setTimeout(render, 6000); } }, `Analyze last 7 days (${s.history_count})`),
       s.pending_count > 0 && h('button', { class: 'btn', onclick: async () => { const r = await api(`/api/sources/${s.id}/analyze`, { method: 'POST' });
         toast(r.error ? 'Analysis failed: ' + r.error.slice(0, 80) : `Analyzed — ${r.tasks_created} new task(s)`); render(); } }, 'Analyze now'),
       h('button', { class: 'btn ghost', onclick: () => sourceForm(s, view) }, 'Edit')),
@@ -618,21 +621,24 @@ function sourceCard(s, view) {
 function sourceForm(s, view) {
   const holder = $('#src-form');
   const f = { name: '', match_pattern: '', channel: 'whatsapp', context: '', enabled: 1, is_direct: 0, ...(s || {}) };
-  const name = h('input', { type: 'text', value: f.name, dir: 'auto', placeholder: 'e.g. Noam – class parents' });
+  const name = h('input', { type: 'text', value: f.name, dir: 'auto', placeholder: 'e.g. Class 4B parents' });
   const pat = h('input', { type: 'text', value: f.match_pattern, dir: 'auto', placeholder: 'Part of the chat name' });
   const channel = h('input', { type: 'text', value: f.channel, style: { width: '120px' } });
-  const ctx = h('textarea', { dir: 'auto', placeholder: 'Tell the model about this source: who\'s who, what matters, what to ignore.\ne.g. "My son\'s 4th-grade class. Teacher: רונית. The class rep is דנה. Ignore birthday wishes."' }, f.context);
+  const ctx = h('textarea', { dir: 'auto', placeholder: 'Tell the model about this source: who\'s who, what matters, what to ignore.\ne.g. "My child\'s class parents group. The teacher is Ms. Green and the class rep is Dana. Ignore birthday wishes."' }, f.context);
   const enabled = h('input', { type: 'checkbox', checked: !!f.enabled });
   const direct = h('input', { type: 'checkbox', checked: !!f.is_direct });
+  const history = h('input', { type: 'checkbox', checked: true });
   const form = h('div', { class: 'card inline-form', style: { marginBottom: '12px' } },
     h('div', { class: 'row' }, h('label', { style: { flex: 1 } }, 'Name', name), h('label', { style: { flex: 1 } }, 'Chat name contains', pat), h('label', {}, 'Channel', channel)),
     h('label', {}, 'Context for the model', ctx),
     h('div', { class: 'row' },
       h('label', { class: 'check' }, direct, 'One-on-one chat (e.g. a therapist)'),
       h('label', { class: 'check' }, enabled, 'Enabled')),
+    !(s && s.id) && h('label', { class: 'check' }, history, 'Also look for tasks in the last 7 days of this chat (recommended)'),
     h('div', { class: 'row' },
       h('button', { class: 'btn primary', onclick: async () => {
-        const body = { name: name.value, match_pattern: pat.value, channel: channel.value, context: ctx.value, enabled: enabled.checked, is_direct: direct.checked };
+        const body = { name: name.value, match_pattern: pat.value, channel: channel.value, context: ctx.value, enabled: enabled.checked, is_direct: direct.checked,
+          history_days: !(s && s.id) && history.checked ? 7 : 0 };
         if (s && s.id) await api(`/api/sources/${s.id}`, { method: 'PUT', body }); else await api('/api/sources', { body });
         toast('Source saved'); render();
       } }, 'Save'),
@@ -665,7 +671,7 @@ async function renderSettings(view) {
       `${(stats.totals.input_tokens / 1000).toFixed(1)}k in / ${(stats.totals.output_tokens / 1000).toFixed(1)}k out tokens` +
       (stats.totals.failed_batches ? ` · ${stats.totals.failed_batches} failed runs` : '')),
 
-    scheduleSection(info),
+    scheduleSection(info, stats),
 
     ...(await rulesSection()),
 
@@ -707,7 +713,31 @@ async function renderSettings(view) {
     h('div', { style: { marginTop: '24px' } }, h('button', { class: 'btn ghost', onclick: async () => { await api('/api/logout', { method: 'POST' }); location.href = '/login'; } }, 'Sign out'))].filter(Boolean));
 }
 
-function scheduleSection(info) {
+function analyzeNowRow(pending) {
+  const label = h('span', { class: 'hint' });
+  const btn = h('button', { class: 'btn' }, 'Analyze now');
+  const show = (n, running) => {
+    label.textContent = running ? 'Analyzing…' : n ? `${n} message${n > 1 ? 's' : ''} waiting for analysis` : 'Nothing is waiting for analysis';
+    btn.disabled = running || !n; btn.textContent = running ? 'Analyzing…' : 'Analyze now';
+  };
+  async function poll() {
+    for (let i = 0; i < 100 && document.body.contains(btn); i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const s = await api('/api/analyze');
+      show(s.pending, s.running);
+      if (!s.running) { toast('Analysis finished'); render(); return; }
+    }
+  }
+  btn.addEventListener('click', async () => {
+    try { await api('/api/analyze', { method: 'POST', body: {} }); } catch { return; }
+    show(pending, true); poll();
+  });
+  show(pending, false);
+  return h('div', { class: 'toolbar', style: { marginBottom: '6px' } }, label, h('span', { class: 'spacer' }), btn);
+}
+
+function scheduleSection(info, stats) {
+  const analyzeRow = analyzeNowRow(stats.totals.pending);
   let times = info.schedule && info.schedule.length ? [...info.schedule] : ['07:00', '12:00', '16:00', '20:00'];
   let mode = info.schedule && info.schedule.length ? 'scheduled' : 'realtime';
   const box = h('div', { class: 'card', style: { padding: '12px 14px' } });
@@ -725,6 +755,7 @@ function scheduleSection(info) {
       h('input', { type: 'radio', name: 'sched-mode', checked: mode === value, onchange: () => { mode = value; if (value === 'realtime') save(); else draw(); } }),
       h('span', {}, h('strong', {}, title), h('span', { class: 'hint', style: { display: 'block' } }, hint)));
     box.replaceChildren(...[
+      analyzeRow,
       radio('scheduled', 'A few times a day (recommended)', 'Cheapest. Chatter Radar reads everything new at the times below. Messages that look urgent (today, cancelled, early pickup…) are analyzed within a couple of minutes anyway.'),
       scheduled && h('div', { class: 'sched-times' },
         times.map((t, i) => h('span', { class: 'sched-time' },

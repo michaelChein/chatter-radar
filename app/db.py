@@ -259,6 +259,7 @@ MIGRATIONS = [
     ("messages", "external_key", "TEXT"),
     ("messages", "urgent", "INTEGER NOT NULL DEFAULT 0"),
     ("sources", "is_direct", "INTEGER NOT NULL DEFAULT 0"),
+    ("sources", "history_days", "INTEGER NOT NULL DEFAULT 0"),  # also analyze this many days of history when a chat becomes a source
 ]
 
 

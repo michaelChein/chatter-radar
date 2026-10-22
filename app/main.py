@@ -470,7 +470,9 @@ def list_sources():
         (SELECT count(*) FROM messages m WHERE m.source_id=s.id) AS message_count,
         (SELECT count(*) FROM messages m WHERE m.source_id=s.id AND m.analyzed_at IS NULL) AS pending_count,
         (SELECT max(sent_at) FROM messages m WHERE m.source_id=s.id) AS last_message_at,
-        (SELECT count(*) FROM tasks t WHERE t.source_id=s.id AND t.status='open') AS open_tasks
+        (SELECT count(*) FROM tasks t WHERE t.source_id=s.id AND t.status='open') AS open_tasks,
+        (SELECT count(*) FROM messages m WHERE m.source_id=s.id AND m.batch_id IS NULL AND m.analyzed_at IS NOT NULL
+            AND m.sent_at >= strftime('%Y-%m-%dT%H:%M:%S', 'now', '-7 days')) AS history_count
         FROM sources s ORDER BY s.name""")
 
 
@@ -481,17 +483,19 @@ def _source_fields(p: dict) -> dict:
         raise HTTPException(400, "name and match_pattern are required")
     return {"name": name, "match_pattern": pattern, "channel": (p.get("channel") or "whatsapp").strip(),
             "context": (p.get("context") or "").strip(), "enabled": 1 if p.get("enabled", True) else 0,
-            "is_direct": 1 if p.get("is_direct") else 0}
+            "is_direct": 1 if p.get("is_direct") else 0,
+            "history_days": max(0, min(30, int(p.get("history_days") or 0)))}
 
 
 @app.post("/api/sources")
 def create_source(payload: dict = Body(...)):
     f = _source_fields(payload)
     with db.tx() as conn:
-        sid = conn.execute("""INSERT INTO sources (name, channel, match_pattern, context, enabled, is_direct, created_at)
-                              VALUES (?,?,?,?,?,?,?)""",
+        sid = conn.execute("""INSERT INTO sources (name, channel, match_pattern, context, enabled, is_direct, history_days,
+                                                   created_at)
+                              VALUES (?,?,?,?,?,?,?,?)""",
                            (f["name"], f["channel"], f["match_pattern"], f["context"], f["enabled"], f["is_direct"],
-                            db.now_iso())).lastrowid
+                            f["history_days"], db.now_iso())).lastrowid
     return db.row("SELECT * FROM sources WHERE id=?", (sid,))
 
 
@@ -517,6 +521,17 @@ def delete_source(sid: int):
 @app.post("/api/sources/{sid}/analyze")
 def analyze_now(sid: int):
     return analyzer.analyze_source(sid)
+
+
+@app.post("/api/sources/{sid}/analyze-history")
+def analyze_history(sid: int, payload: dict = Body(default={})):
+    """Look for tasks in the last `days` (default 7) of a source's stored history, in the background."""
+    if not db.row("SELECT id FROM sources WHERE id=?", (sid,)):
+        raise HTTPException(404, "no such source")
+    days = max(1, min(30, int(payload.get("days") or 7)))
+    n = analyzer.requeue_history(sid, days)
+    started = analyzer.start_manual_run()["started"] if n else False
+    return {"requeued": n, "started": started}
 
 
 @app.get("/api/chats")
@@ -757,20 +772,22 @@ def setup_status():
             "collectors": collectors, "sources": db.rows("SELECT count(*) n FROM sources")[0]["n"]}
 
 
+@app.post("/api/analyze")
+def analyze_all():
+    """"Analyze now": everything waiting, in the background. Poll GET /api/analyze for progress."""
+    return analyzer.start_manual_run()
+
+
+@app.get("/api/analyze")
+def analyze_status():
+    return {"running": analyzer.manual_running(), "pending": len(db.rows("SELECT id FROM messages WHERE analyzed_at IS NULL"))}
+
+
 @app.post("/api/llm/retry")
 def llm_retry():
     """After topping up credit or replacing the key: forget the warning and analyze what is waiting, right now."""
     llm.clear_problem()
-    pending = db.rows("SELECT DISTINCT source_id FROM messages WHERE analyzed_at IS NULL")
-
-    def run():
-        for r in pending:
-            try:
-                analyzer.analyze_source(r["source_id"])
-            except Exception:
-                log.exception("retry failed for source %s", r["source_id"])
-    threading.Thread(target=run, daemon=True).start()
-    return {"ok": True, "sources": len(pending)}
+    return {"ok": True, "sources": analyzer.start_manual_run()["sources"]}
 
 
 @app.post("/api/setup/finish")

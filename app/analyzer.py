@@ -356,6 +356,52 @@ def _num(v):
         return None
 
 
+def requeue_history(source_id: int, days: int = 7) -> int:
+    """Make the stored-but-never-analyzed history of a source (last `days` days) waiting again. Returns how many."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    with db.tx() as conn:
+        return conn.execute("""UPDATE messages SET analyzed_at = NULL
+                               WHERE source_id = ? AND batch_id IS NULL AND analyzed_at IS NOT NULL AND sent_at >= ?""",
+                            (source_id, cutoff)).rowcount
+
+
+_manual = {"running": False}
+_manual_lock = threading.Lock()
+
+
+def pending_sources() -> list[int]:
+    return [r["source_id"] for r in db.rows(
+        """SELECT DISTINCT m.source_id FROM messages m JOIN sources s ON s.id = m.source_id
+           WHERE m.analyzed_at IS NULL AND s.enabled = 1""")]
+
+
+def manual_running() -> bool:
+    return _manual["running"]
+
+
+def start_manual_run() -> dict:
+    """Analyze everything that is waiting, right now, in the background (ignores the schedule and the error backoff)."""
+    ids = pending_sources()
+    with _manual_lock:
+        if _manual["running"]:
+            return {"started": False, "running": True, "sources": len(ids)}
+        if not ids:
+            return {"started": False, "running": False, "sources": 0}
+        _manual["running"] = True
+
+    def run():
+        try:
+            for sid in ids:
+                try:
+                    analyze_source(sid)
+                except Exception:
+                    log.exception("manual analysis failed for source %s", sid)
+        finally:
+            _manual["running"] = False
+    threading.Thread(target=run, daemon=True, name="manual-analysis").start()
+    return {"started": True, "running": True, "sources": len(ids)}
+
+
 def loop():
     sched = schedule()
     log.info("analyzer loop started (%s)", f"schedule={','.join(sched)}, urgent after {URGENT_DEBOUNCE}s"

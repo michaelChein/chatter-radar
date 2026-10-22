@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from zoneinfo import ZoneInfo
 
@@ -85,12 +85,16 @@ def ingest(n: Normalized) -> dict:
             result.update(duplicate=True, message_id=existing["id"])
             return result
 
+        # History loaded when a chat becomes a source is normally stored but not analyzed. A source can ask for its
+        # last few days to be analyzed too (sources.history_days).
+        history_days = int(src.get("history_days") or 0)
+        analyze_history = bool(n.backfill and history_days and sent >= datetime.now(timezone.utc) - timedelta(days=history_days))
         cur = conn.execute(
             """INSERT INTO messages (source_id, channel, chat_name, sender, body, media_type, sent_at, ingested_at,
                                      collectors, dedup_key, external_key, analyzed_at, urgent)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (src["id"], n.channel, n.chat, sender, body, n.media_type, n.sent_at, now,
-             json.dumps([n.collector], ensure_ascii=False), key, ext_key, now if n.backfill else None,
+             json.dumps([n.collector], ensure_ascii=False), key, ext_key, now if (n.backfill and not analyze_history) else None,
              0 if n.backfill else int(bool(URGENT.search(body)))))
         result.update(stored=True, message_id=cur.lastrowid)
         return result

@@ -276,3 +276,92 @@ def test_info_carries_credit_and_links(client, monkeypatch):
     import app.about as about
     monkeypatch.setattr(about, "REPO_URL", "https://github.com/OWNER/x")   # an unfilled template shows no dead links
     assert about.credit()["repo_url"] == "" and about.credit()["issues_url"] == ""
+
+
+def test_analyze_now_runs_everything_waiting_and_guards_double_clicks(client, monkeypatch):
+    import threading
+    import time
+    import app.analyzer as an
+    import app.llm as llm
+    assert client.post("/api/analyze").json() == {"started": False, "running": False, "sources": 0}   # nothing waiting
+
+    client.post("/api/sources", json={"name": "A", "match_pattern": "Class A"})
+    client.post("/api/sources", json={"name": "B", "match_pattern": "Class B"})
+    client.post("/api/ingest", headers=H, json=wa("Class A", "Ms. Green: please bring a white shirt tomorrow"))
+    client.post("/api/ingest", headers=H, json=wa("Class B", "Dana: please transfer $50 by Thursday"))
+    assert client.get("/api/analyze").json() == {"running": False, "pending": 2}
+
+    gate, calls = threading.Event(), []
+
+    def slow_call_tool(system, user, tool, max_tokens=0):
+        calls.append(1)
+        gate.wait(5)
+        return {"tasks": [], "cancelled": []}, {"input_tokens": 1, "output_tokens": 1}
+    monkeypatch.setattr(llm, "call_tool", slow_call_tool)
+
+    r = client.post("/api/analyze").json()
+    assert r == {"started": True, "running": True, "sources": 2}
+    assert client.get("/api/analyze").json()["running"] is True
+    assert client.post("/api/analyze").json()["started"] is False        # a second click while it runs does nothing
+    gate.set()
+    for _ in range(50):
+        if not client.get("/api/analyze").json()["running"]:
+            break
+        time.sleep(0.1)
+    assert client.get("/api/analyze").json() == {"running": False, "pending": 0}
+    assert len(calls) == 2                                                 # one extractor run per source
+
+
+def _history_msg(chat, text, days_ago, ext):
+    ts = (datetime.now(timezone.utc) - timedelta(days=days_ago)).timestamp()
+    return {"source": "mac", "chat": chat, "sender": "Dana", "text": text, "ts": ts, "backfill": True, "external_id": ext}
+
+
+def test_source_can_analyze_recent_history_as_it_loads(client):
+    client.post("/api/sources", json={"name": "With", "match_pattern": "Class A", "history_days": 7})
+    client.post("/api/sources", json={"name": "Without", "match_pattern": "Class B"})
+    for chat in ("Class A", "Class B"):
+        client.post("/api/ingest", headers=H, json=_history_msg(chat, "bring a white shirt", 2, f"{chat}-recent"))
+        client.post("/api/ingest", headers=H, json=_history_msg(chat, "old news", 12, f"{chat}-old"))
+    waiting = {m["chat_name"]: m["body"] for m in client.get("/api/messages?only=pending").json()}
+    assert waiting == {"Class A": "bring a white shirt"}      # only the recent history of the source that asked for it
+    assert len(client.get("/api/messages").json()) == 4       # everything is stored either way
+
+
+def test_analyze_older_messages_button_backend(client, monkeypatch):
+    import time
+    import app.llm as llm
+    sid = client.post("/api/sources", json={"name": "Class", "match_pattern": "Class A"}).json()["id"]
+    client.post("/api/ingest", headers=H, json=_history_msg("Class A", "bring a white shirt", 3, "recent"))
+    client.post("/api/ingest", headers=H, json=_history_msg("Class A", "old news", 20, "old"))
+    src = client.get("/api/sources").json()[0]
+    assert src["pending_count"] == 0 and src["history_count"] == 1          # one message from the last 7 days was skipped
+
+    monkeypatch.setattr(llm, "call_tool", lambda *a, **k: ({"tasks": [], "cancelled": []}, {"input_tokens": 1, "output_tokens": 1}))
+    assert client.post("/api/sources/999/analyze-history").status_code == 404
+    r = client.post(f"/api/sources/{sid}/analyze-history", json={"days": 7}).json()
+    assert r == {"requeued": 1, "started": True}
+    for _ in range(50):
+        if not client.get("/api/analyze").json()["running"]:
+            break
+        time.sleep(0.1)
+    src = client.get("/api/sources").json()[0]
+    assert src["pending_count"] == 0 and src["history_count"] == 0           # analyzed now, the 20-day-old one stays history
+    assert client.post(f"/api/sources/{sid}/analyze-history").json() == {"requeued": 0, "started": False}
+
+
+def test_database_from_before_history_days_is_upgraded(tmp_path, monkeypatch):
+    import sqlite3
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.executescript("""CREATE TABLE sources (id INTEGER PRIMARY KEY, name TEXT NOT NULL, channel TEXT NOT NULL DEFAULT 'whatsapp',
+        match_pattern TEXT NOT NULL, context TEXT NOT NULL DEFAULT '', is_direct INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
+        INSERT INTO sources (name, match_pattern, created_at) VALUES ('Existing', 'x', '2026-10-01T00:00:00+00:00');""")
+    old.commit(); old.close()
+    monkeypatch.setenv("RADAR_DB", str(path))
+    from app import db
+    importlib.reload(db)
+    db.init_db()
+    row = db.row("SELECT name, history_days FROM sources")
+    assert row == {"name": "Existing", "history_days": 0}                    # existing sources keep the old behaviour
