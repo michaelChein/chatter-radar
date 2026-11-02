@@ -8,22 +8,11 @@
 
 Chatter Radar is a self-hosted web app that watches chats you choose and turns the messages that matter into a task list. Examples: a class parents' WhatsApp group, a one-on-one chat with a tutor, a sports club. It includes an assistant you can chat with. The assistant answers questions about your messages and tasks and helps the pipeline learn from your feedback. Changes to the pipeline's instructions always wait for your approval.
 
-```
- Mac collector ──────────────► /api/ingest ──► chat is a Source? ──no──► chat name + counter only
- (WhatsApp for Mac database,                        │ yes
-  incl. photos/PDFs/voice)                           ▼
-                                        messages + attachments (never stored twice)
-                                                     │  chat quiet for 2 min (max 10)
-                                                     ▼
-   instructions ──────────────────────────► extractor (Claude) ──► tasks
-   (rules · source context · categories)          ▲                     │
-          ▲                                       │ images, PDFs,       ▼
-          │ approve / reject                      │ voice transcripts  Tasks / Messages UI
-   proposals ◄── assistant (chat, tools) ◄── your labels: Irrelevant / Should be a task / Done
-               replays the extractor on your labeled history: current vs. proposed
-```
+<p align="center">
+  <img src="docs/how-it-works.png" alt="How it works: a Mac listener collects messages from WhatsApp for Mac, only from chats you pick. Claude finds what needs doing and turns it into tasks. A web app gives you a friendly, clear view of everything you need to do.">
+</p>
 
-Nothing connects to WhatsApp's servers. The collector only reads the database that WhatsApp for Mac already keeps on your computer, so there is no ban risk.
+**No bot to add.** You don't invite a bot into your groups or forward messages to one, and nobody else in the chat sees anything different. Nothing connects to WhatsApp's servers. The collector only reads the database that WhatsApp for Mac already keeps on your computer, so there is no ban risk.
 
 
 ![Tasks](docs/tasks.png)
